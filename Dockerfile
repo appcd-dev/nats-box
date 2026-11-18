@@ -10,12 +10,15 @@
 # that rootfs onto scratch. The Alpine base layers, which contain zlib 1.3.2,
 # are not in the image Xray scans.
 
-FROM golang:1.27.3-alpine3.24 AS nats-top
+FROM --platform=$BUILDPLATFORM golang:1.27.3-alpine3.24 AS nats-top
+
+ARG TARGETOS
+ARG TARGETARCH
 
 RUN apk add --no-cache git
 WORKDIR /src
 RUN git clone --depth 1 --branch v0.6.5 https://github.com/nats-io/nats-top.git .
-ENV CGO_ENABLED=0
+ENV CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH
 RUN go get github.com/nats-io/nats-server/v2@v2.15.3 \
     && go mod tidy \
     && go build -trimpath -buildvcs=false \
@@ -26,10 +29,11 @@ RUN go get github.com/nats-io/nats-server/v2@v2.15.3 \
          echo "nats-top still links nats-server v2.15.1" >&2; exit 1; \
        fi
 
-FROM golang:1.27.3-alpine3.24 AS tools
+FROM --platform=$BUILDPLATFORM golang:1.27.3-alpine3.24 AS tools
 
+ARG TARGETOS
 ARG TARGETARCH
-ENV CGO_ENABLED=0
+ENV CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH
 ENV GOPATH=/go/${TARGETARCH}
 
 RUN mkdir -p "${GOPATH}" \
