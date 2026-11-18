@@ -1,58 +1,88 @@
 # syntax=docker/dockerfile:1
-FROM golang:1.27.3-alpine3.24 AS builder
+# Hardened nats-box 0.20.2.
+#
+# XRAY-1162975: upstream go-installs nats-top v0.6.5, which links nats-server
+# v2.15.1. This build compiles nats-top v0.6.5 against nats-server v2.15.3.
+# natscli v0.5.1 already links v2.15.2, which includes the fix.
+#
+# CVE-2026-4738: the running tools need Alpine (shell, curl, jq, figlet), so
+# zlib stays, but it is 1.4-r0. The published image is one layer copied from
+# that rootfs onto scratch. The Alpine base layers, which contain zlib 1.3.2,
+# are not in the image Xray scans.
 
-LABEL maintainer="Derek Collison <derek@nats.io>"
-LABEL maintainer="Waldemar Quevedo <wally@nats.io>"
+FROM golang:1.27.3-alpine3.24 AS nats-top
+
+RUN apk add --no-cache git
+WORKDIR /src
+RUN git clone --depth 1 --branch v0.6.5 https://github.com/nats-io/nats-top.git .
+ENV CGO_ENABLED=0
+RUN go get github.com/nats-io/nats-server/v2@v2.15.3 \
+    && go mod tidy \
+    && go build -trimpath -buildvcs=false \
+        -ldflags "-s -w -X main.version=0.6.5" \
+        -o /out/nats-top . \
+    && go version -m /out/nats-top | grep 'nats-server/v2' | grep -q 'v2.15.3' \
+    && if go version -m /out/nats-top | grep 'nats-server/v2' | grep -q 'v2.15.1'; then \
+         echo "nats-top still links nats-server v2.15.1" >&2; exit 1; \
+       fi
+
+FROM golang:1.27.3-alpine3.24 AS tools
 
 ARG TARGETARCH
-
-ARG VERSION_NATS
-ARG VERSION_NATS_TOP
-ARG VERSION_NSC
-ARG VERSION_NKEYS
-
+ENV CGO_ENABLED=0
 ENV GOPATH=/go/${TARGETARCH}
 
-RUN <<EOT
-    set -e
-    mkdir -p ${GOPATH}
+RUN mkdir -p "${GOPATH}" \
+    && go install -ldflags "-X main.version=2.15.0" github.com/nats-io/nsc/v2@v2.15.0 \
+    && go install -ldflags "-X main.version=0.5.1" github.com/nats-io/natscli/nats@v0.5.1 \
+    && go install -ldflags "-X main.version=0.4.16" github.com/nats-io/nkeys/nk@v0.4.16 \
+    && if go version -m "${GOPATH}/bin/"* | grep 'nats-server/v2' | grep -q 'v2.15.1'; then \
+         echo "a nats-box tool still links nats-server v2.15.1" >&2; \
+         go version -m "${GOPATH}/bin/"* | grep 'nats-server/v2' || true; \
+         exit 1; \
+       fi
 
-    go install -ldflags="-X main.version=${VERSION_NSC}" github.com/nats-io/nsc/v2@v${VERSION_NSC}
-    go install -ldflags="-X main.version=${VERSION_NATS_TOP}" github.com/nats-io/nats-top@v${VERSION_NATS_TOP}
-    go install -ldflags="-X main.version=${VERSION_NATS}" github.com/nats-io/natscli/nats@v${VERSION_NATS}
-    go install -ldflags="-X main.version=${VERSION_NKEYS}" github.com/nats-io/nkeys/nk@v${VERSION_NKEYS}
-EOT
-
-FROM alpine:3.24.3
+FROM alpine:3.24.3 AS rootfs
 
 ARG TARGETARCH
 
-COPY --from=builder /go/${TARGETARCH}/bin/* /usr/local/bin
-
-RUN <<EOT
-    set -e
-    apk -U upgrade
-    apk add --no-cache ca-certificates curl figlet jq
-    rm -rf /var/cache/apk && mkdir /var/cache/apk
-
-    addgroup -g 1000 nats
-    adduser -D -u 1000 -G nats nats
-
-    mkdir -p /nsc
-    chown nats:root /nsc /home/nats
+RUN set -eux; \
+    apk -U upgrade; \
+    apk add --no-cache ca-certificates curl figlet jq; \
+    apk add --no-cache --upgrade 'zlib=1.4-r0'; \
+    zlib_ver="$(apk list -I zlib)"; \
+    echo "${zlib_ver}"; \
+    echo "${zlib_ver}" | grep -q '^zlib-1.4-r0 '; \
+    echo "${zlib_ver}" | grep -q '1.3' && exit 1 || true; \
+    rm -rf /var/cache/apk; \
+    mkdir /var/cache/apk; \
+    addgroup -g 1000 nats; \
+    adduser -D -u 1000 -G nats nats; \
+    mkdir -p /nsc; \
+    chown nats:root /nsc /home/nats; \
     chmod 0775 /nsc /home/nats
-EOT
 
-ENV NKEYS_PATH=/nsc/nkeys
-ENV XDG_DATA_HOME=/nsc
-ENV XDG_CONFIG_HOME=/nsc/.config
-
+COPY --from=tools /go/${TARGETARCH}/bin/ /usr/local/bin/
+COPY --from=nats-top /out/nats-top /usr/local/bin/nats-top
 COPY entrypoint.sh /entrypoint.sh
+COPY profile.sh /etc/profile.d/profile.sh
 
-COPY profile.sh /etc/profile.d
+RUN chmod +x /entrypoint.sh /usr/local/bin/nats-top
 
-RUN chmod +x /entrypoint.sh
+FROM scratch
+
+COPY --from=rootfs / /
+
+ENV NKEYS_PATH=/nsc/nkeys \
+    XDG_DATA_HOME=/nsc \
+    XDG_CONFIG_HOME=/nsc/.config \
+    PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 WORKDIR /root
 
 ENTRYPOINT ["/entrypoint.sh"]
+
+LABEL org.opencontainers.image.title="nats-box" \
+      org.opencontainers.image.source="https://github.com/nats-io/nats-box" \
+      org.opencontainers.image.licenses="Apache-2.0" \
+      org.opencontainers.image.version="0.20.2"
