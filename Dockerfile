@@ -36,13 +36,18 @@ ARG TARGETARCH
 ENV CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH
 ENV GOPATH=/go/${TARGETARCH}
 
-RUN mkdir -p "${GOPATH}" \
+RUN mkdir -p "${GOPATH}" /out \
     && go install -ldflags "-X main.version=2.15.0" github.com/nats-io/nsc/v2@v2.15.0 \
     && go install -ldflags "-X main.version=0.5.1" github.com/nats-io/natscli/nats@v0.5.1 \
     && go install -ldflags "-X main.version=0.4.16" github.com/nats-io/nkeys/nk@v0.4.16 \
-    && if go version -m "${GOPATH}/bin/"* | grep 'nats-server/v2' | grep -q 'v2.15.1'; then \
+    && for name in nsc nats nk; do \
+         src="${GOPATH}/bin/${TARGETOS}_${TARGETARCH}/${name}"; \
+         if [ ! -x "$src" ]; then src="${GOPATH}/bin/${name}"; fi; \
+         cp "$src" "/out/${name}"; \
+       done \
+    && if go version -m /out/* | grep 'nats-server/v2' | grep -q 'v2.15.1'; then \
          echo "a nats-box tool still links nats-server v2.15.1" >&2; \
-         go version -m "${GOPATH}/bin/"* | grep 'nats-server/v2' || true; \
+         go version -m /out/* | grep 'nats-server/v2' || true; \
          exit 1; \
        fi
 
@@ -66,7 +71,7 @@ RUN set -eux; \
     chown nats:root /nsc /home/nats; \
     chmod 0775 /nsc /home/nats
 
-COPY --from=tools /go/${TARGETARCH}/bin/ /usr/local/bin/
+COPY --from=tools /out/ /usr/local/bin/
 COPY --from=nats-top /out/nats-top /usr/local/bin/nats-top
 COPY entrypoint.sh /entrypoint.sh
 COPY profile.sh /etc/profile.d/profile.sh
